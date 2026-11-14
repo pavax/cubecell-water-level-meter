@@ -1,12 +1,12 @@
 # CubeCell Wasserstand
 
-Firmware für das Heltec CubeCell **HTCC-AB02** (EU868, OTAA, Port 2). Zwei Ultraschallsensoren **A0120AU** messen die Distanz und senden beide Werte in einem kurzen Paket.
+Firmware für das Heltec CubeCell **HTCC-AB02** (EU868, OTAA, Port 2). Ultraschall (**A0120AU**), Leck-Sonde und **DS18B20**-Temperatur in einem kurzen Paket.
 
 ## Ein Zyklus
 
 1. Aufwachen, Batteriespannung lesen.
 2. Mess-LED setzen, Sensorversorgung (Vext) einschalten.
-3. Sensor 1 und Sensor 2 nacheinander per softSerial auslesen, danach Leck-Sonde.
+3. Sensor 1 und Sensor 2 nacheinander per softSerial, danach Leck-Sonde und DS18B20.
 4. Bei UI-Zyklus (Boot oder User-Button): OLED/RGB an (JOINING / SENDING / Messwerte).
 5. Paket senden, Display/RGB aus, Vext aus, Schlaf (Standardintervall **30 min**).
 
@@ -18,26 +18,30 @@ Ein Soft-Watchdog wird zu Beginn jedes Messzyklus (`prepareTxFrame`) auf **2 Stu
 
 Zwei **A0120AU** (UART Auto, 9600 8N1). Heltec `softSerial` hat nur einen globalen Empfangspfad — die Sensoren werden nacheinander gelesen (`begin` → Frames → `end`). Pro Sensor: **7 Samples** (150 ms Abstand), davon der **Median** in mm.
 
-Aktivierung per Define in `cubecell_water_level.ino` (mindestens einer muss an sein):
+Aktivierung per Define in `cubecell_water_level.ino` (mindestens ein Sensor):
 
 ```cpp
-#define SENSOR1_ENABLED 1
+#define SENSOR1_ENABLED 0
 #define SENSOR2_ENABLED 1
+#define LEAK_ENABLED 1
+#define TEMP_ENABLED 1
 ```
 
-Deaktiviert (`0`): kein Auslesen, Distanz `0`, Status `0` (missing), Display zeigt `S1 off` / `S2 off`.
+Deaktiviert (`0`): kein Auslesen, Distanz/Temp `0`, Status `0` (missing).
 
 | Signal | Pin |
 |---|---|
-| Sensor 1 + 2 VCC | `Vext` |
-| Sensor 1 + 2 GND | `GND` |
-| Sensor 1 TX | `GPIO2` |
+| Sensor 1 + 2 / DS18B20 VCC | `Vext` |
+| Sensor 1 + 2 / DS18B20 GND | `GND` |
+| Sensor 1 TX | `GPIO4` |
 | Sensor 2 TX | `GPIO3` |
 | SoftSerial TX (Dummy) | `GPIO1` |
+| DS18B20 DQ | `GPIO2` |
+| DS18B20 Pull-up 4,7 kΩ | `GPIO2` → `Vext` |
 
 Sensor-RX bleibt unbeschaltet (Auto-/Processed-Modus). Gesendet wird die Rohdistanz in mm; Umrechnung in Füllhöhe folgt später.
 
-Beide Sensoren hängen gleichzeitig an Vext und können sich gegenseitig leicht stören. Falls die Werte unruhig sind, später Enable-FETs prüfen.
+Beide Ultraschallsensoren hängen gleichzeitig an Vext und können sich gegenseitig leicht stören. Falls die Werte unruhig sind, später Enable-FETs prüfen.
 
 ### Leck-Sonde
 
@@ -54,9 +58,18 @@ Zweiadrige Leitfähigkeits-Sonde mit externem Pull-up nach **Vext** (nicht VDD).
 | Sonde GND | `GND` |
 | Pull-up 470 kΩ–1 MΩ | `GPIO12` → `Vext` |
 
+### DS18B20
+
+Ein Sensor am Bus (Heltec `OneWire`, Skip ROM, kein Search). 9‑Bit-Auflösung, Convert-Wartezeit ~100 ms. Jeder `reset()` wird geprüft; bei Fehler Status `missing`, Messung übersprungen.
+
+```cpp
+#define TEMP_ENABLED 1
+#define TEMP_PIN GPIO2
+```
+
 ## Paket
 
-11 Bytes, Port 2, big-endian.
+14 Bytes, Port 2, big-endian.
 
 | Bytes | Wert | bedeutet |
 |---|---|---|
@@ -67,14 +80,16 @@ Zweiadrige Leitfähigkeits-Sonde mit externem Pull-up nach **Vext** (nicht VDD).
 | 8 | Status Sensor 1 | `1` ok, `0` fehlt, `9` Timeout |
 | 9 | Status Sensor 2 | `1` ok, `0` fehlt, `9` Timeout |
 | 10 | Leck | `0` trocken, `1` nass |
+| 11–12 | Temperatur, 0,01 °C | int16, z. B. 2450 → 24,50 °C |
+| 13 | Status Temp | `1` ok, `0` fehlt |
 
-Ein Beispiel-Decoder für The Things Stack / ChirpStack liegt unter [`examples/payload_decoder.js`](examples/payload_decoder.js).
+Ein Beispiel-Decoder für The Things Stack / ChirpStack liegt unter [`examples/payload_decoder.js`](examples/payload_decoder.js) (akzeptiert auch Legacy 11/10 Bytes).
 
 ## Downlink
 
 | Port | Inhalt | Beispiel (Hex) |
 |---|---|---|
-| 2 | Uplink, 11 Bytes | — |
+| 2 | Uplink, 14 Bytes | — |
 | 4 | Intervall in Sekunden (uint16, big-endian), gilt bis zum nächsten Reset bzw. bis erneut gesetzt | `0384` = 900 s |
 | 9 | Soft-Reset (`HW_Reset`) | `01` |
 

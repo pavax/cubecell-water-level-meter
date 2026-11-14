@@ -13,9 +13,9 @@ extern SH1107Wire display;
 // Two A0120AU ultrasonic sensors (UART auto, 9600 8N1), softSerial RX pins.
 // Heltec softSerial uses static RX/TX state — read sensors one after another.
 // Set to 0 to disable a sensor (payload status = missing, distance = 0).
-#define SENSOR1_ENABLED 0
+#define SENSOR1_ENABLED 1
 #define SENSOR2_ENABLED 1
-#define SENSOR1_RX_PIN GPIO2
+#define SENSOR1_RX_PIN GPIO4
 #define SENSOR2_RX_PIN GPIO3
 #define SENSOR_TX_DUMMY GPIO1
 #define SENSOR_UART_BAUD 9600
@@ -31,8 +31,14 @@ extern SH1107Wire display;
 #define LEAK_PIN GPIO12
 #define LEAK_SETTLE_MS 5
 
-#if !SENSOR1_ENABLED && !SENSOR2_ENABLED
-#error "Enable at least one of SENSOR1_ENABLED / SENSOR2_ENABLED"
+// DS18B20 (1-Wire): DQ -> TEMP_PIN, VDD -> Vext, GND -> GND, 4.7k DQ -> Vext.
+// Skip ROM only (single sensor). 9-bit convert ~100 ms; every reset checked.
+#define TEMP_ENABLED 1
+#define TEMP_PIN GPIO2
+#define TEMP_CONVERT_WAIT_MS 100
+
+#if !SENSOR1_ENABLED && !SENSOR2_ENABLED && !LEAK_ENABLED && !TEMP_ENABLED
+#error "Enable at least one of SENSOR1_ENABLED / SENSOR2_ENABLED / LEAK_ENABLED / TEMP_ENABLED"
 #endif
 
 #define WATER_LEVEL_STATUS_OK 1
@@ -43,48 +49,48 @@ extern SH1107Wire display;
 #define LEAK_STATUS_WET 1
 #define LEAK_STATUS_MISSING 0
 
-// 0xRRGGBB. Cyan while measuring, independent of the core's colors.
-#define COLOR_MEASURE 0x005050
+#define TEMP_STATUS_OK 1
+#define TEMP_STATUS_MISSING 0
+
+#if TEMP_ENABLED
+#define ONEWIRE_SEARCH 0
+#define ONEWIRE_CRC16 0
+#include "OneWire.h"
+#endif
+
+#define COLOR_MEASURE 0x005050  // cyan while measuring
 #define DISPLAY_PAGE_MS 2000
+// OLED needs Vext up before any display.init(); Heltec enableDisplay() inits immediately.
+#define DISPLAY_VEXT_SETTLE_MS 100
 
-/*LoraWan channelsmask, default channels 0-7*/
 uint16_t userChannelsMask[6] = { 0x00FF, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000 };
-
-/*LoraWan region, select in arduino IDE tools*/
 LoRaMacRegion_t loraWanRegion = ACTIVE_REGION;
-
-/*LoraWan Class, Class A and Class C are supported*/
 DeviceClass_t loraWanClass = LORAWAN_CLASS;
-
-/*the application data transmission duty cycle. value in [ms].*/
 uint32_t appTxDutyCycle = APP_TX_DUTY_MS;
-
-/*OTAA or ABP*/
 bool overTheAirActivation = LORAWAN_NETMODE;
-
-/*ADR enable*/
 bool loraWanAdr = LORAWAN_ADR;
-
-/* set LORAWAN_Net_Reserve ON, the node could save the network info to flash, when node reset not need to join again */
 bool keepNet = LORAWAN_NET_RESERVE;
-
-/* Indicates if the node is sending confirmed or unconfirmed messages */
 bool isTxConfirmed = LORAWAN_UPLINKMODE;
-
-/* Application port */
 uint8_t appPort = 2;
-
-/* Number of confirmed uplink retries. The MAC lowers the datarate after repeated misses. */
 uint8_t confirmedNbTrials = 8;
 
 static unsigned int batteryVoltage;
 static unsigned int uptimeCount;
-static volatile bool accelWoke = false;
+static volatile bool userKeyWakePending = false;
 
 static TimerEvent_t cycleWatchdogTimer;
 static char displayBuf[32];
 
+#if TEMP_ENABLED
+static OneWire tempWire(TEMP_PIN);
+#endif
+
 void enableDisplayAndRgb() {
+  // Power OLED before Heltec enableDisplay()/displaySending() call display.init().
+  // Init with Vext off can wedge I2C; then the whole UI cycle stays blank.
+  digitalWrite(Vext, LOW);
+  delay(DISPLAY_VEXT_SETTLE_MS);
+  LoRaWAN.holdVext(true);
   LoRaWAN.enableDisplay();
   LoRaWAN.enableRgb();
 }
@@ -94,10 +100,9 @@ void disableDisplayAndRgb() {
   LoRaWAN.disableRgb();
 }
 
-
 void beginDisplayUpdate() {
   digitalWrite(Vext, LOW);
-  delay(10);
+  delay(DISPLAY_VEXT_SETTLE_MS);
   display.init();
 }
 
@@ -129,8 +134,8 @@ void showMeasurePage(const char *title, const char *value, const char *unit) {
   drawCounterHeader();
   display.setFont(ArialMT_Plain_10);
   display.drawString(64, 18, title);
-  display.setFont(ArialMT_Plain_24);
-  display.drawString(64, 30, value);
+  display.setFont(ArialMT_Plain_16);
+  display.drawString(64, 32, value);
   display.setFont(ArialMT_Plain_10);
   display.drawString(64, 54, unit);
   display.display();
@@ -152,7 +157,8 @@ void showMeasuringScreen() {
 
 void showMeasurePages(uint16_t distance1mm, uint8_t sensor1Status,
                       uint16_t distance2mm, uint8_t sensor2Status,
-                      uint8_t leakStatus, uint16_t batteryMv) {
+                      uint8_t leakStatus, int16_t tempCentiC, uint8_t tempStatus,
+                      uint16_t batteryMv) {
   if (!LoRaWAN.isDisplayEnabled()) {
     return;
   }
@@ -183,6 +189,22 @@ void showMeasurePages(uint16_t distance1mm, uint8_t sensor1Status,
   (void)leakStatus;
 #endif
 
+#if TEMP_ENABLED
+  if (tempStatus == TEMP_STATUS_OK) {
+    const int16_t absCenti = (tempCentiC < 0) ? (int16_t)(-tempCentiC) : tempCentiC;
+    sprintf(displayBuf, "%s%d.%02u",
+            (tempCentiC < 0) ? "-" : "",
+            absCenti / 100,
+            (unsigned)(absCenti % 100));
+    showMeasurePage("Temp", displayBuf, "C");
+  } else {
+    showMeasurePage("Temp", "---", "C");
+  }
+#else
+  (void)tempCentiC;
+  (void)tempStatus;
+#endif
+
   sprintf(displayBuf, "%u.%02u", batteryMv / 1000, (batteryMv % 1000) / 10);
   showMeasurePage("Battery", displayBuf, "V");
 }
@@ -205,6 +227,10 @@ void putUint16(uint8_t offset, uint16_t value) {
   appData[offset + 1] = lowByte(value);
 }
 
+void putInt16(uint8_t offset, int16_t value) {
+  putUint16(offset, (uint16_t)value);
+}
+
 void powerSensorOn() {
   digitalWrite(Vext, LOW);
   delay(SENSOR_POWER_SETTLE_MS);
@@ -215,7 +241,6 @@ void powerSensorOff() {
   LoRaWAN.holdVext(false);
 }
 
-// One valid A0120AU frame from an already-open softSerial. Returns true on success.
 bool readA0120SampleMm(softSerial &ss, uint16_t &distanceMm) {
   distanceMm = 0;
   ss.flush();
@@ -255,7 +280,6 @@ bool readA0120SampleMm(softSerial &ss, uint16_t &distanceMm) {
 }
 
 uint16_t medianU16(uint16_t *values, uint8_t count) {
-  // Insertion sort; count is small (SENSOR_SAMPLE_COUNT).
   for (uint8_t i = 1; i < count; i++) {
     uint16_t key = values[i];
     int8_t j = (int8_t)i - 1;
@@ -268,9 +292,7 @@ uint16_t medianU16(uint16_t *values, uint8_t count) {
   return values[count / 2];
 }
 
-// A0120AU UART frame: 0xFF, DATA_H, DATA_L, SUM=(0xFF+H+L)&0xFF; distance in mm.
-// Collects SENSOR_SAMPLE_COUNT samples and returns their median.
-// softSerial must be opened/closed per call (shared static state).
+// A0120AU: 0xFF, H, L, SUM; median of SENSOR_SAMPLE_COUNT samples (mm).
 uint8_t readA0120Mm(uint8_t rxPin, uint16_t &distanceMm) {
   distanceMm = 0;
 
@@ -304,6 +326,48 @@ uint8_t readLeakStatus() {
   return (digitalRead(LEAK_PIN) == LOW) ? LEAK_STATUS_WET : LEAK_STATUS_DRY;
 }
 
+#if TEMP_ENABLED
+// Skip ROM, 9-bit. Heltec OneWire (CubeCell). tempCentiC = 0.01 °C.
+uint8_t readDs18b20CentiC(int16_t &tempCentiC) {
+  uint8_t data[9];
+  tempCentiC = 0;
+
+  if (!tempWire.reset()) {
+    return TEMP_STATUS_MISSING;
+  }
+  tempWire.skip();
+  tempWire.write(0x4E); // Write Scratchpad
+  tempWire.write(0x00); // TH
+  tempWire.write(0x00); // TL
+  tempWire.write(0x1F); // 9-bit
+
+  if (!tempWire.reset()) {
+    return TEMP_STATUS_MISSING;
+  }
+  tempWire.skip();
+  tempWire.write(0x44); // Convert T (external power)
+  delay(TEMP_CONVERT_WAIT_MS);
+
+  if (!tempWire.reset()) {
+    return TEMP_STATUS_MISSING;
+  }
+  tempWire.skip();
+  tempWire.write(0xBE); // Read Scratchpad
+  for (uint8_t i = 0; i < 9; i++) {
+    data[i] = tempWire.read();
+  }
+
+  if (OneWire::crc8(data, 8) != data[8]) {
+    return TEMP_STATUS_MISSING;
+  }
+
+  int16_t raw = (int16_t)(((uint16_t)data[1] << 8) | data[0]);
+  raw &= ~7; // 9-bit unused LSBs
+  tempCentiC = (int16_t)((raw * 100) / 16);
+  return TEMP_STATUS_OK;
+}
+#endif
+
 void prepareTxFrame(uint8_t port) {
   (void)port;
 
@@ -311,7 +375,7 @@ void prepareTxFrame(uint8_t port) {
 
   detachInterrupt(WAKE_UP_PIN);
   batteryVoltage = getBatteryVoltage();
-  attachInterrupt(WAKE_UP_PIN, onWakeUp, RISING);
+  attachInterrupt(WAKE_UP_PIN, onUserKeyWake, RISING);
 
   Serial.printf("Measure uptime=%u battery=%u mV interval=%lu s display=%u\r\n",
                 uptimeCount, batteryVoltage, (unsigned long)(appTxDutyCycle / 1000),
@@ -343,18 +407,23 @@ void prepareTxFrame(uint8_t port) {
   uint8_t leakStatus = LEAK_STATUS_MISSING;
 #endif
 
+  int16_t tempCentiC = 0;
+#if TEMP_ENABLED
+  uint8_t tempStatus = readDs18b20CentiC(tempCentiC);
+#else
+  uint8_t tempStatus = TEMP_STATUS_MISSING;
+#endif
+
   if (LoRaWAN.isRgbEnabled()) {
-    turnOffRGB();
+    turnOnRGB(0, 0);
   }
 
   if (LoRaWAN.isDisplayEnabled()) {
     showMeasurePages(distance1mm, sensor1Status, distance2mm, sensor2Status, leakStatus,
-                     batteryVoltage);
+                     tempCentiC, tempStatus, batteryVoltage);
   }
-  // Vext stays on until prepareBeforeSleep.
 
-  // 11 bytes, Port 2, big-endian.
-  appDataSize = 11;
+  appDataSize = 14;
   putUint16(0, uptimeCount);
   putUint16(2, batteryVoltage);
   putUint16(4, distance1mm);
@@ -362,26 +431,28 @@ void prepareTxFrame(uint8_t port) {
   appData[8] = sensor1Status;
   appData[9] = sensor2Status;
   appData[10] = leakStatus;
+  putInt16(11, tempCentiC);
+  appData[13] = tempStatus;
 
-  Serial.printf("TX #%u d1=%u mm s1=%u d2=%u mm s2=%u leak=%u bat=%u\r\n",
+  Serial.printf("TX #%u d1=%u mm s1=%u d2=%u mm s2=%u leak=%u temp=%d.%02u C st=%u bat=%u\r\n",
                 uptimeCount, distance1mm, sensor1Status, distance2mm, sensor2Status, leakStatus,
-                batteryVoltage);
+                tempCentiC / 100,
+                (unsigned)((tempCentiC < 0 ? -tempCentiC : tempCentiC) % 100),
+                tempStatus, batteryVoltage);
 
   uptimeCount++;
 }
 
 void prepareBeforeSleep() {
-  if (LoRaWAN.isDisplayEnabled()) {
-    disableDisplayAndRgb();
-  }
+  disableDisplayAndRgb();
   powerSensorOff();
   Serial.println(F("Sleep: Vext turned off"));
   delay(50);
 }
 
-void onWakeUp() {
+void onUserKeyWake() {
   if (deviceState == DEVICE_STATE_SLEEP && digitalRead(WAKE_UP_PIN) == HIGH) {
-    accelWoke = true;
+    userKeyWakePending = true;
   }
 }
 
@@ -390,7 +461,7 @@ void showBootColors() {
   turnOnRGB(COLOR_RXWINDOW2, 500);
   turnOnRGB(COLOR_RECEIVED, 500);
   turnOnRGB(COLOR_RXWINDOW1, 500);
-  turnOffRGB();
+  turnOnRGB(0, 0);
 }
 
 void setup() {
@@ -410,9 +481,9 @@ void setup() {
   deviceState = DEVICE_STATE_INIT;
   LoRaWAN.ifskipjoin();
 
-  accelWoke = false;
+  userKeyWakePending = false;
   pinMode(WAKE_UP_PIN, INPUT_PULLUP);
-  attachInterrupt(WAKE_UP_PIN, onWakeUp, RISING);
+  attachInterrupt(WAKE_UP_PIN, onUserKeyWake, RISING);
 #if LEAK_ENABLED
   pinMode(LEAK_PIN, INPUT);
 #endif
@@ -440,7 +511,6 @@ void loop() {
       break;
     }
     case DEVICE_STATE_SEND: {
-      // water_meter.ino: displaySending() before prepare — re-arms isDisplayOn/Vext.
       if (LoRaWAN.isDisplayEnabled()) {
         LoRaWAN.displaySending();
         showMeasuringScreen();
@@ -459,13 +529,12 @@ void loop() {
       break;
     }
     case DEVICE_STATE_SLEEP: {
-      if (accelWoke) {
+      if (userKeyWakePending) {
         Serial.println(F("Wakeup: send now (UI on)"));
         enableDisplayAndRgb();
         LoRaWAN.txNextPacket();
-        accelWoke = false;
+        userKeyWakePending = false;
       } else {
-        // water_meter.ino: displayAck in sleep path (no-op if no ACK / display off)
         if (LoRaWAN.isDisplayEnabled()) {
           LoRaWAN.displayAck(false, false);
         }
