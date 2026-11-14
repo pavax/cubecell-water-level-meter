@@ -6,7 +6,7 @@ Firmware für das Heltec CubeCell **HTCC-AB02** (EU868, OTAA, Port 2). Zwei Ultr
 
 1. Aufwachen, Batteriespannung lesen.
 2. Mess-LED setzen, Sensorversorgung (Vext) einschalten.
-3. Sensor 1 und Sensor 2 nacheinander per softSerial auslesen.
+3. Sensor 1 und Sensor 2 nacheinander per softSerial auslesen, danach Leck-Sonde.
 4. Bei UI-Zyklus (Boot oder User-Button): OLED/RGB an (JOINING / SENDING / Messwerte).
 5. Paket senden, Display/RGB aus, Vext aus, Schlaf (Standardintervall **30 min**).
 
@@ -39,9 +39,24 @@ Sensor-RX bleibt unbeschaltet (Auto-/Processed-Modus). Gesendet wird die Rohdist
 
 Beide Sensoren hängen gleichzeitig an Vext und können sich gegenseitig leicht stören. Falls die Werte unruhig sind, später Enable-FETs prüfen.
 
+### Leck-Sonde
+
+Zweiadrige Leitfähigkeits-Sonde mit externem Pull-up nach **Vext** (nicht VDD). Nur bei eingeschaltetem Vext lesen; im Sleep ist Vext aus → keine Elektrolyse.
+
+```cpp
+#define LEAK_ENABLED 1
+#define LEAK_PIN GPIO12
+```
+
+| Signal | Pin |
+|---|---|
+| Sonde Sense | `GPIO12` |
+| Sonde GND | `GND` |
+| Pull-up 470 kΩ–1 MΩ | `GPIO12` → `Vext` |
+
 ## Paket
 
-10 Bytes, Port 2, big-endian.
+11 Bytes, Port 2, big-endian.
 
 | Bytes | Wert | bedeutet |
 |---|---|---|
@@ -51,6 +66,7 @@ Beide Sensoren hängen gleichzeitig an Vext und können sich gegenseitig leicht 
 | 6–7 | Distanz Sensor 2, mm | Abstand Sensor → Oberfläche |
 | 8 | Status Sensor 1 | `1` ok, `0` fehlt, `9` Timeout |
 | 9 | Status Sensor 2 | `1` ok, `0` fehlt, `9` Timeout |
+| 10 | Leck | `0` trocken, `1` nass |
 
 Ein Beispiel-Decoder für The Things Stack / ChirpStack liegt unter [`examples/payload_decoder.js`](examples/payload_decoder.js).
 
@@ -58,7 +74,7 @@ Ein Beispiel-Decoder für The Things Stack / ChirpStack liegt unter [`examples/p
 
 | Port | Inhalt | Beispiel (Hex) |
 |---|---|---|
-| 2 | Uplink, 10 Bytes | — |
+| 2 | Uplink, 11 Bytes | — |
 | 4 | Intervall in Sekunden (uint16, big-endian), gilt bis zum nächsten Reset bzw. bis erneut gesetzt | `0384` = 900 s |
 | 9 | Soft-Reset (`HW_Reset`) | `01` |
 

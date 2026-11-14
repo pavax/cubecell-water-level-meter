@@ -25,6 +25,12 @@ extern SH1107Wire display;
 #define SENSOR_SAMPLE_TIMEOUT_MS 800
 #define SENSOR_READ_TIMEOUT_MS (SENSOR_SAMPLE_COUNT * (SENSOR_SAMPLE_TIMEOUT_MS + SENSOR_SAMPLE_GAP_MS))
 
+// 2-wire leak probe: pin -> probe -> GND, external 470k–1M pull-up to Vext.
+// Read only while Vext is on. LOW = wet, HIGH = dry.
+#define LEAK_ENABLED 1
+#define LEAK_PIN GPIO12
+#define LEAK_SETTLE_MS 5
+
 #if !SENSOR1_ENABLED && !SENSOR2_ENABLED
 #error "Enable at least one of SENSOR1_ENABLED / SENSOR2_ENABLED"
 #endif
@@ -33,9 +39,13 @@ extern SH1107Wire display;
 #define WATER_LEVEL_STATUS_MISSING 0
 #define WATER_LEVEL_STATUS_TIMEOUT 9
 
+#define LEAK_STATUS_DRY 0
+#define LEAK_STATUS_WET 1
+#define LEAK_STATUS_MISSING 0
+
 // 0xRRGGBB. Cyan while measuring, independent of the core's colors.
 #define COLOR_MEASURE 0x005050
-#define DISPLAY_PAGE_MS 3500
+#define DISPLAY_PAGE_MS 2000
 
 /*LoraWan channelsmask, default channels 0-7*/
 uint16_t userChannelsMask[6] = { 0x00FF, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000 };
@@ -140,9 +150,9 @@ void showMeasuringScreen() {
   display.display();
 }
 
-void showMeasurePages(uint16_t distance1mm, uint8_t status1,
-                      uint16_t distance2mm, uint8_t status2,
-                      uint16_t batteryMv) {
+void showMeasurePages(uint16_t distance1mm, uint8_t sensor1Status,
+                      uint16_t distance2mm, uint8_t sensor2Status,
+                      uint8_t leakStatus, uint16_t batteryMv) {
   if (!LoRaWAN.isDisplayEnabled()) {
     return;
   }
@@ -150,7 +160,7 @@ void showMeasurePages(uint16_t distance1mm, uint8_t status1,
   beginDisplayUpdate();
 
 #if SENSOR1_ENABLED
-  if (status1 == WATER_LEVEL_STATUS_OK) {
+  if (sensor1Status == WATER_LEVEL_STATUS_OK) {
     sprintf(displayBuf, "%u", distance1mm / 10);
     showMeasurePage("Sensor 1", displayBuf, "cm");
   } else {
@@ -159,12 +169,18 @@ void showMeasurePages(uint16_t distance1mm, uint8_t status1,
 #endif
 
 #if SENSOR2_ENABLED
-  if (status2 == WATER_LEVEL_STATUS_OK) {
+  if (sensor2Status == WATER_LEVEL_STATUS_OK) {
     sprintf(displayBuf, "%u", distance2mm / 10);
     showMeasurePage("Sensor 2", displayBuf, "cm");
   } else {
     showMeasurePage("Sensor 2", "---", "cm");
   }
+#endif
+
+#if LEAK_ENABLED
+  showMeasurePage("Leak", leakStatus == LEAK_STATUS_WET ? "WET" : "DRY", "");
+#else
+  (void)leakStatus;
 #endif
 
   sprintf(displayBuf, "%u.%02u", batteryMv / 1000, (batteryMv % 1000) / 10);
@@ -283,6 +299,11 @@ uint8_t readA0120Mm(uint8_t rxPin, uint16_t &distanceMm) {
   return WATER_LEVEL_STATUS_OK;
 }
 
+uint8_t readLeakStatus() {
+  delay(LEAK_SETTLE_MS);
+  return (digitalRead(LEAK_PIN) == LOW) ? LEAK_STATUS_WET : LEAK_STATUS_DRY;
+}
+
 void prepareTxFrame(uint8_t port) {
   (void)port;
 
@@ -303,33 +324,48 @@ void prepareTxFrame(uint8_t port) {
   powerSensorOn();
   uint16_t distance1mm = 0;
   uint16_t distance2mm = 0;
+
 #if SENSOR1_ENABLED
-  uint8_t status1 = readA0120Mm(SENSOR1_RX_PIN, distance1mm);
+  uint8_t sensor1Status = readA0120Mm(SENSOR1_RX_PIN, distance1mm);
 #else
-  uint8_t status1 = WATER_LEVEL_STATUS_MISSING;
-#endif
-#if SENSOR2_ENABLED
-  uint8_t status2 = readA0120Mm(SENSOR2_RX_PIN, distance2mm);
-#else
-  uint8_t status2 = WATER_LEVEL_STATUS_MISSING;
+  uint8_t sensor1Status = WATER_LEVEL_STATUS_MISSING;
 #endif
 
+#if SENSOR2_ENABLED
+  uint8_t sensor2Status = readA0120Mm(SENSOR2_RX_PIN, distance2mm);
+#else
+  uint8_t sensor2Status = WATER_LEVEL_STATUS_MISSING;
+#endif
+
+#if LEAK_ENABLED
+  uint8_t leakStatus = readLeakStatus();
+#else
+  uint8_t leakStatus = LEAK_STATUS_MISSING;
+#endif
+
+  if (LoRaWAN.isRgbEnabled()) {
+    turnOffRGB();
+  }
+
   if (LoRaWAN.isDisplayEnabled()) {
-    showMeasurePages(distance1mm, status1, distance2mm, status2, batteryVoltage);
+    showMeasurePages(distance1mm, sensor1Status, distance2mm, sensor2Status, leakStatus,
+                     batteryVoltage);
   }
   // Vext stays on until prepareBeforeSleep.
 
-  // 10 bytes, Port 2, big-endian.
-  appDataSize = 10;
+  // 11 bytes, Port 2, big-endian.
+  appDataSize = 11;
   putUint16(0, uptimeCount);
   putUint16(2, batteryVoltage);
   putUint16(4, distance1mm);
   putUint16(6, distance2mm);
-  appData[8] = status1;
-  appData[9] = status2;
+  appData[8] = sensor1Status;
+  appData[9] = sensor2Status;
+  appData[10] = leakStatus;
 
-  Serial.printf("TX #%u d1=%u mm s1=%u d2=%u mm s2=%u bat=%u\r\n",
-                uptimeCount, distance1mm, status1, distance2mm, status2, batteryVoltage);
+  Serial.printf("TX #%u d1=%u mm s1=%u d2=%u mm s2=%u leak=%u bat=%u\r\n",
+                uptimeCount, distance1mm, sensor1Status, distance2mm, sensor2Status, leakStatus,
+                batteryVoltage);
 
   uptimeCount++;
 }
@@ -377,6 +413,9 @@ void setup() {
   accelWoke = false;
   pinMode(WAKE_UP_PIN, INPUT_PULLUP);
   attachInterrupt(WAKE_UP_PIN, onWakeUp, RISING);
+#if LEAK_ENABLED
+  pinMode(LEAK_PIN, INPUT);
+#endif
 
   TimerInit(&cycleWatchdogTimer, onCycleTimeoutWatchdog);
 }
