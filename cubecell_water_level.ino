@@ -102,7 +102,6 @@ void showWelcomeScreen() {
   display.drawString(64, 38, F("Water Level"));
   display.drawString(64, 52, F("CubeCell AB02"));
   display.display();
-  delay(3000);
 }
 
 void drawCounterHeader() {
@@ -114,7 +113,7 @@ void drawCounterHeader() {
   display.drawHorizontalLine(0, 14, 128);
 }
 
-void showMeasurementPage(const char *title, const char *value, const char *unit) {
+void showMeasurePage(const char *title, const char *value, const char *unit) {
   display.init();
   display.clear();
   drawCounterHeader();
@@ -141,8 +140,8 @@ void showMeasuringScreen() {
   display.display();
 }
 
-void showMeasurePages(uint16_t distance1Mm, uint8_t status1,
-                      uint16_t distance2Mm, uint8_t status2,
+void showMeasurePages(uint16_t distance1mm, uint8_t status1,
+                      uint16_t distance2mm, uint8_t status2,
                       uint16_t batteryMv) {
   if (!LoRaWAN.isDisplayEnabled()) {
     return;
@@ -152,24 +151,24 @@ void showMeasurePages(uint16_t distance1Mm, uint8_t status1,
 
 #if SENSOR1_ENABLED
   if (status1 == WATER_LEVEL_STATUS_OK) {
-    sprintf(displayBuf, "%u", distance1Mm / 10);
-    showMeasurementPage("Sensor 1", displayBuf, "cm");
+    sprintf(displayBuf, "%u", distance1mm / 10);
+    showMeasurePage("Sensor 1", displayBuf, "cm");
   } else {
-    showMeasurementPage("Sensor 1", "---", "cm");
+    showMeasurePage("Sensor 1", "---", "cm");
   }
 #endif
 
 #if SENSOR2_ENABLED
   if (status2 == WATER_LEVEL_STATUS_OK) {
-    sprintf(displayBuf, "%u", distance2Mm / 10);
-    showMeasurementPage("Sensor 2", displayBuf, "cm");
+    sprintf(displayBuf, "%u", distance2mm / 10);
+    showMeasurePage("Sensor 2", displayBuf, "cm");
   } else {
-    showMeasurementPage("Sensor 2", "---", "cm");
+    showMeasurePage("Sensor 2", "---", "cm");
   }
 #endif
 
   sprintf(displayBuf, "%u.%02u", batteryMv / 1000, (batteryMv % 1000) / 10);
-  showMeasurementPage("Battery", displayBuf, "V");
+  showMeasurePage("Battery", displayBuf, "V");
 }
 
 void onCycleTimeoutWatchdog() {
@@ -302,21 +301,21 @@ void prepareTxFrame(uint8_t port) {
   }
 
   powerSensorOn();
-  uint16_t distance1Mm = 0;
-  uint16_t distance2Mm = 0;
+  uint16_t distance1mm = 0;
+  uint16_t distance2mm = 0;
 #if SENSOR1_ENABLED
-  uint8_t status1 = readA0120Mm(SENSOR1_RX_PIN, distance1Mm);
+  uint8_t status1 = readA0120Mm(SENSOR1_RX_PIN, distance1mm);
 #else
   uint8_t status1 = WATER_LEVEL_STATUS_MISSING;
 #endif
 #if SENSOR2_ENABLED
-  uint8_t status2 = readA0120Mm(SENSOR2_RX_PIN, distance2Mm);
+  uint8_t status2 = readA0120Mm(SENSOR2_RX_PIN, distance2mm);
 #else
   uint8_t status2 = WATER_LEVEL_STATUS_MISSING;
 #endif
 
   if (LoRaWAN.isDisplayEnabled()) {
-    showMeasurePages(distance1Mm, status1, distance2Mm, status2, batteryVoltage);
+    showMeasurePages(distance1mm, status1, distance2mm, status2, batteryVoltage);
   }
   // Vext stays on until prepareBeforeSleep.
 
@@ -324,13 +323,13 @@ void prepareTxFrame(uint8_t port) {
   appDataSize = 10;
   putUint16(0, uptimeCount);
   putUint16(2, batteryVoltage);
-  putUint16(4, distance1Mm);
-  putUint16(6, distance2Mm);
+  putUint16(4, distance1mm);
+  putUint16(6, distance2mm);
   appData[8] = status1;
   appData[9] = status2;
 
   Serial.printf("TX #%u d1=%u mm s1=%u d2=%u mm s2=%u bat=%u\r\n",
-                uptimeCount, distance1Mm, status1, distance2Mm, status2, batteryVoltage);
+                uptimeCount, distance1mm, status1, distance2mm, status2, batteryVoltage);
 
   uptimeCount++;
 }
@@ -351,10 +350,10 @@ void onWakeUp() {
 }
 
 void showBootColors() {
-  turnOnRGB(COLOR_SEND, 400);
-  turnOnRGB(COLOR_RXWINDOW2, 400);
-  turnOnRGB(COLOR_RECEIVED, 400);
-  turnOnRGB(COLOR_RXWINDOW1, 400);
+  turnOnRGB(COLOR_SEND, 500);
+  turnOnRGB(COLOR_RXWINDOW2, 500);
+  turnOnRGB(COLOR_RECEIVED, 500);
+  turnOnRGB(COLOR_RXWINDOW1, 500);
   turnOffRGB();
 }
 
@@ -369,7 +368,6 @@ void setup() {
 #endif
 
   enableDisplayAndRgb();
-  LoRaWAN.displayMcuInit();
   showWelcomeScreen();
   showBootColors();
 
@@ -398,7 +396,6 @@ void loop() {
       break;
     }
     case DEVICE_STATE_JOIN: {
-      // water_meter.ino: always displayJoining before join()
       LoRaWAN.displayJoining();
       LoRaWAN.join();
       break;
