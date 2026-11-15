@@ -1,7 +1,7 @@
 #include "LoRaWan_APP.h"
 #include "Arduino.h"
 #include "credentials.h"
-#include "cubecell_utils.h"
+#include "src/utils/cubecell_utils.h"
 #include "softSerial.h"
 #include "HT_SH1107Wire.h"
 
