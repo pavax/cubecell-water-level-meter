@@ -90,10 +90,18 @@ Ein Beispiel-Decoder für The Things Stack / ChirpStack liegt unter [`examples/p
 | Port | Inhalt | Beispiel (Hex) |
 |---|---|---|
 | 2 | Uplink, 14 Bytes | — |
-| 4 | Intervall in Sekunden (uint16, big-endian), gilt bis zum nächsten Reset bzw. bis erneut gesetzt | `0384` = 900 s |
+| 4 | Intervall in Sekunden (uint16, big-endian), wird in EEPROM gespeichert und überlebt Power-Cycle | siehe unten |
 | 9 | Soft-Reset (`HW_Reset`) | `01` |
 
-Port 4 braucht mindestens zwei Bytes. Port 9 wertet nur den Port aus; ein beliebiges Byte reicht. Standardintervall nach Boot: 30 Minuten.
+Port-4-Beispiele (big-endian):
+
+| Hex | Sekunden | Intervall |
+|---|---|---|
+| `0384` | 900 | 15 min |
+| `0708` | 1800 | 30 min |
+| `0E10` | 3600 | 1 h |
+
+Port 4 braucht mindestens zwei Bytes; `0000` wird ignoriert. Port 9 wertet nur den Port aus; ein beliebiges Byte reicht. Ohne gespeicherten Wert: Standardintervall 30 Minuten.
 
 ## Build
 

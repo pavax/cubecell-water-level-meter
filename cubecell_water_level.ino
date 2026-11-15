@@ -1,6 +1,7 @@
 #include "LoRaWan_APP.h"
 #include "Arduino.h"
 #include "credentials.h"
+#include "cubecell_utils.h"
 #include "softSerial.h"
 #include "HT_SH1107Wire.h"
 
@@ -533,6 +534,8 @@ void loop() {
 #if (AT_SUPPORT)
       getDevParam();
 #endif
+      // After getDevParam so a Port-4 interval beats AT/default DutyCycle.
+      loadPersistedSleepTime(appTxDutyCycle);
       printDevParam();
       LoRaWAN.init(loraWanClass, loraWanRegion);
       deviceState = DEVICE_STATE_JOIN;
@@ -593,9 +596,13 @@ void downLinkDataHandle(McpsIndication_t *mcpsIndication) {
   Serial.println();
 
   if (mcpsIndication->Port == 4 && mcpsIndication->BufferSize >= 2) {
-    int newSleepTime = mcpsIndication->Buffer[1] | (mcpsIndication->Buffer[0] << 8);
-    appTxDutyCycle = newSleepTime * 1000;
-    saveDr();
+    uint16_t newSleepTime = (uint16_t)(mcpsIndication->Buffer[1] | (mcpsIndication->Buffer[0] << 8));
+    if (newSleepTime == 0) {
+      Serial.println(F("Duty cycle ignored (0 s)"));
+      return;
+    }
+    appTxDutyCycle = (uint32_t)newSleepTime * 1000UL;
+    persistSleepTime(newSleepTime);
     Serial.printf("Duty cycle %lu ms\r\n", (unsigned long)appTxDutyCycle);
   } else if (mcpsIndication->Port == 9) {
     Serial.println(F("Reset"));
