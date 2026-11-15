@@ -14,7 +14,7 @@ extern SH1107Wire display;
 // Heltec softSerial uses static RX/TX state — read sensors one after another.
 // Set to 0 to disable a sensor (payload status = missing, distance = 0).
 #define SENSOR1_ENABLED 1
-#define SENSOR2_ENABLED 1
+#define SENSOR2_ENABLED 0
 #define SENSOR1_RX_PIN GPIO4
 #define SENSOR2_RX_PIN GPIO3
 #define SENSOR_TX_DUMMY GPIO1
@@ -31,14 +31,19 @@ extern SH1107Wire display;
 #define LEAK_PIN GPIO12
 #define LEAK_SETTLE_MS 5
 
-// DS18B20 (1-Wire): DQ -> TEMP_PIN, VDD -> Vext, GND -> GND, 4.7k DQ -> Vext.
-// Skip ROM only (single sensor). 9-bit convert ~100 ms; every reset checked.
-#define TEMP_ENABLED 1
-#define TEMP_PIN GPIO2
-#define TEMP_CONVERT_WAIT_MS 100
+// DS18B20 (1-Wire): DQ -> TEMPERATURE_PIN, VDD -> Vext, GND -> GND, 4.7k DQ -> Vext.
+// Skip ROM only (single sensor). 9-bit convert; margin over datasheet 93.75 ms.
+// After Vext cold-start early readings are often POR (clone 25 °C / Maxim 85 °C):
+// take 3 readings, keep the last. Reject 85.00 °C as unfinished convert.
+#define TEMPERATURE_ENABLED 1
+#define TEMPERATURE_PIN GPIO2
+#define TEMPERATURE_CONVERT_WAIT_MS 200
+#define TEMPERATURE_READ_COUNT 3
+#define TEMPERATURE_RETRY_COUNT 3
+#define TEMPERATURE_POR_MAXIM_CENTI 8500
 
-#if !SENSOR1_ENABLED && !SENSOR2_ENABLED && !LEAK_ENABLED && !TEMP_ENABLED
-#error "Enable at least one of SENSOR1_ENABLED / SENSOR2_ENABLED / LEAK_ENABLED / TEMP_ENABLED"
+#if !SENSOR1_ENABLED && !SENSOR2_ENABLED && !LEAK_ENABLED && !TEMPERATURE_ENABLED
+#error "Enable at least one of SENSOR1_ENABLED / SENSOR2_ENABLED / LEAK_ENABLED / TEMPERATURE_ENABLED"
 #endif
 
 #define WATER_LEVEL_STATUS_OK 1
@@ -49,10 +54,10 @@ extern SH1107Wire display;
 #define LEAK_STATUS_WET 1
 #define LEAK_STATUS_MISSING 0
 
-#define TEMP_STATUS_OK 1
-#define TEMP_STATUS_MISSING 0
+#define TEMPERATURE_STATUS_OK 1
+#define TEMPERATURE_STATUS_MISSING 0
 
-#if TEMP_ENABLED
+#if TEMPERATURE_ENABLED
 #define ONEWIRE_SEARCH 0
 #define ONEWIRE_CRC16 0
 #include "OneWire.h"
@@ -81,8 +86,8 @@ static volatile bool userKeyWakePending = false;
 static TimerEvent_t cycleWatchdogTimer;
 static char displayBuf[32];
 
-#if TEMP_ENABLED
-static OneWire tempWire(TEMP_PIN);
+#if TEMPERATURE_ENABLED
+static OneWire temperatureWire(TEMPERATURE_PIN);
 #endif
 
 void enableDisplayAndRgb() {
@@ -157,7 +162,7 @@ void showMeasuringScreen() {
 
 void showMeasurePages(uint16_t distance1mm, uint8_t sensor1Status,
                       uint16_t distance2mm, uint8_t sensor2Status,
-                      uint8_t leakStatus, int16_t tempCentiC, uint8_t tempStatus,
+                      uint8_t leakStatus, int16_t temperatureCentiC, uint8_t temperatureStatus,
                       uint16_t batteryMv) {
   if (!LoRaWAN.isDisplayEnabled()) {
     return;
@@ -189,11 +194,11 @@ void showMeasurePages(uint16_t distance1mm, uint8_t sensor1Status,
   (void)leakStatus;
 #endif
 
-#if TEMP_ENABLED
-  if (tempStatus == TEMP_STATUS_OK) {
-    const int16_t absCenti = (tempCentiC < 0) ? (int16_t)(-tempCentiC) : tempCentiC;
+#if TEMPERATURE_ENABLED
+  if (temperatureStatus == TEMPERATURE_STATUS_OK) {
+    const int16_t absCenti = (temperatureCentiC < 0) ? (int16_t)(-temperatureCentiC) : temperatureCentiC;
     sprintf(displayBuf, "%s%d.%02u",
-            (tempCentiC < 0) ? "-" : "",
+            (temperatureCentiC < 0) ? "-" : "",
             absCenti / 100,
             (unsigned)(absCenti % 100));
     showMeasurePage("Temp", displayBuf, "C");
@@ -201,8 +206,8 @@ void showMeasurePages(uint16_t distance1mm, uint8_t sensor1Status,
     showMeasurePage("Temp", "---", "C");
   }
 #else
-  (void)tempCentiC;
-  (void)tempStatus;
+  (void)temperatureCentiC;
+  (void)temperatureStatus;
 #endif
 
   sprintf(displayBuf, "%u.%02u", batteryMv / 1000, (batteryMv % 1000) / 10);
@@ -326,47 +331,75 @@ uint8_t readLeakStatus() {
   return (digitalRead(LEAK_PIN) == LOW) ? LEAK_STATUS_WET : LEAK_STATUS_DRY;
 }
 
-#if TEMP_ENABLED
-// Skip ROM, 9-bit. Heltec OneWire (CubeCell). tempCentiC = 0.01 °C.
-uint8_t readDs18b20CentiC(int16_t &tempCentiC) {
+// One Convert T + scratchpad read. Heltec OneWire (CubeCell). temperatureCentiC = 0.01 °C.
+static bool convertAndReadTemperature(int16_t &temperatureCentiC) {
   uint8_t data[9];
-  tempCentiC = 0;
 
-  if (!tempWire.reset()) {
-    return TEMP_STATUS_MISSING;
+  if (!temperatureWire.reset()) {
+    return false;
   }
-  tempWire.skip();
-  tempWire.write(0x4E); // Write Scratchpad
-  tempWire.write(0x00); // TH
-  tempWire.write(0x00); // TL
-  tempWire.write(0x1F); // 9-bit
+  temperatureWire.skip();
+  temperatureWire.write(0x44); // Convert T (external power)
+  delay(TEMPERATURE_CONVERT_WAIT_MS);
 
-  if (!tempWire.reset()) {
-    return TEMP_STATUS_MISSING;
+  if (!temperatureWire.reset()) {
+    return false;
   }
-  tempWire.skip();
-  tempWire.write(0x44); // Convert T (external power)
-  delay(TEMP_CONVERT_WAIT_MS);
-
-  if (!tempWire.reset()) {
-    return TEMP_STATUS_MISSING;
-  }
-  tempWire.skip();
-  tempWire.write(0xBE); // Read Scratchpad
+  temperatureWire.skip();
+  temperatureWire.write(0xBE); // Read Scratchpad
   for (uint8_t i = 0; i < 9; i++) {
-    data[i] = tempWire.read();
+    data[i] = temperatureWire.read();
   }
 
   if (OneWire::crc8(data, 8) != data[8]) {
-    return TEMP_STATUS_MISSING;
+    return false;
   }
 
   int16_t raw = (int16_t)(((uint16_t)data[1] << 8) | data[0]);
   raw &= ~7; // 9-bit unused LSBs
-  tempCentiC = (int16_t)((raw * 100) / 16);
-  return TEMP_STATUS_OK;
+  temperatureCentiC = (int16_t)((raw * 100) / 16);
+
+  // Maxim POR / unfinished convert after power-up.
+  if (temperatureCentiC == TEMPERATURE_POR_MAXIM_CENTI) {
+    return false;
+  }
+
+  return true;
 }
-#endif
+
+static bool readTemperatureOnce(int16_t &temperatureCentiC) {
+  for (uint8_t attempt = 0; attempt < TEMPERATURE_RETRY_COUNT; attempt++) {
+    if (!temperatureWire.reset()) {
+      delay(20);
+      continue;
+    }
+    temperatureWire.skip();
+    temperatureWire.write(0x4E); // Write Scratchpad
+    temperatureWire.write(0x00); // TH
+    temperatureWire.write(0x00); // TL
+    temperatureWire.write(0x1F); // 9-bit
+
+    if (convertAndReadTemperature(temperatureCentiC)) {
+      return true;
+    }
+    delay(20);
+  }
+  return false;
+}
+
+// Skip ROM, 9-bit. Take TEMPERATURE_READ_COUNT readings after Vext on; keep the last.
+uint8_t readTemperatureCentiC(int16_t &temperatureCentiC) {
+  temperatureCentiC = 0;
+
+  for (uint8_t i = 0; i < TEMPERATURE_READ_COUNT; i++) {
+    int16_t sample = 0;
+    if (!readTemperatureOnce(sample)) {
+      return TEMPERATURE_STATUS_MISSING;
+    }
+    temperatureCentiC = sample;
+  }
+  return TEMPERATURE_STATUS_OK;
+}
 
 void prepareTxFrame(uint8_t port) {
   (void)port;
@@ -407,11 +440,11 @@ void prepareTxFrame(uint8_t port) {
   uint8_t leakStatus = LEAK_STATUS_MISSING;
 #endif
 
-  int16_t tempCentiC = 0;
-#if TEMP_ENABLED
-  uint8_t tempStatus = readDs18b20CentiC(tempCentiC);
+  int16_t temperatureCentiC = 0;
+#if TEMPERATURE_ENABLED
+  uint8_t temperatureStatus = readTemperatureCentiC(temperatureCentiC);
 #else
-  uint8_t tempStatus = TEMP_STATUS_MISSING;
+  uint8_t temperatureStatus = TEMPERATURE_STATUS_MISSING;
 #endif
 
   if (LoRaWAN.isRgbEnabled()) {
@@ -420,7 +453,7 @@ void prepareTxFrame(uint8_t port) {
 
   if (LoRaWAN.isDisplayEnabled()) {
     showMeasurePages(distance1mm, sensor1Status, distance2mm, sensor2Status, leakStatus,
-                     tempCentiC, tempStatus, batteryVoltage);
+                     temperatureCentiC, temperatureStatus, batteryVoltage);
   }
 
   appDataSize = 14;
@@ -431,14 +464,14 @@ void prepareTxFrame(uint8_t port) {
   appData[8] = sensor1Status;
   appData[9] = sensor2Status;
   appData[10] = leakStatus;
-  putInt16(11, tempCentiC);
-  appData[13] = tempStatus;
+  putInt16(11, temperatureCentiC);
+  appData[13] = temperatureStatus;
 
   Serial.printf("TX #%u d1=%u mm s1=%u d2=%u mm s2=%u leak=%u temp=%d.%02u C st=%u bat=%u\r\n",
                 uptimeCount, distance1mm, sensor1Status, distance2mm, sensor2Status, leakStatus,
-                tempCentiC / 100,
-                (unsigned)((tempCentiC < 0 ? -tempCentiC : tempCentiC) % 100),
-                tempStatus, batteryVoltage);
+                temperatureCentiC / 100,
+                (unsigned)((temperatureCentiC < 0 ? -temperatureCentiC : temperatureCentiC) % 100),
+                temperatureStatus, batteryVoltage);
 
   uptimeCount++;
 }

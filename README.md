@@ -24,7 +24,7 @@ Aktivierung per Define in `cubecell_water_level.ino` (mindestens ein Sensor):
 #define SENSOR1_ENABLED 0
 #define SENSOR2_ENABLED 1
 #define LEAK_ENABLED 1
-#define TEMP_ENABLED 1
+#define TEMPERATURE_ENABLED 1
 ```
 
 Deaktiviert (`0`): kein Auslesen, Distanz/Temp `0`, Status `0` (missing).
@@ -60,11 +60,11 @@ Zweiadrige Leitfähigkeits-Sonde mit externem Pull-up nach **Vext** (nicht VDD).
 
 ### DS18B20
 
-Ein Sensor am Bus (Heltec `OneWire`, Skip ROM, kein Search). 9‑Bit-Auflösung, Convert-Wartezeit ~100 ms. Jeder `reset()` wird geprüft; bei Fehler Status `missing`, Messung übersprungen.
+Ein Sensor am Bus (Heltec `OneWire`, Skip ROM, kein Search). 9‑Bit-Auflösung, Convert-Wartezeit ~200 ms. Nach Vext-Kaltstart dreimal messen und das dritte Reading nehmen (frühe Werte oft Clone-POR **25 °C**); Maxim-POR **85 °C** gilt als Fehler. Retries bei Bus/CRC-Fehler; sonst Status `missing`.
 
 ```cpp
-#define TEMP_ENABLED 1
-#define TEMP_PIN GPIO2
+#define TEMPERATURE_ENABLED 1
+#define TEMPERATURE_PIN GPIO2
 ```
 
 ## Paket
